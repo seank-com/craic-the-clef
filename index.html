@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Craic the Clef</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; --ink:#17221b; --green:#237a4b; --red:#b33a3a; }
+    * { box-sizing: border-box; }
+    body { margin:0; min-height:100vh; display:grid; place-items:center; background:#f4f1e8; color:var(--ink); }
+    main { width:min(760px, 100%); padding:clamp(16px, 4vw, 36px); text-align:center; }
+    h1 { margin:0 0 4px; font-size:clamp(1.25rem, 4vw, 1.65rem); font-weight:650; }
+    .scorebar { display:flex; align-items:center; justify-content:center; gap:18px; min-height:36px; }
+    #score { font-variant-numeric:tabular-nums; }
+    #reset { border:0; background:transparent; color:#4b5b50; text-decoration:underline; cursor:pointer; font:inherit; padding:8px; }
+    .card { margin:12px 0 20px; background:#fff; border-radius:18px; box-shadow:0 8px 28px #253a2b18; padding:10px; }
+    svg { display:block; width:100%; height:auto; }
+    .staff-line, .ledger-line { stroke:var(--ink); stroke-width:2.4; stroke-linecap:round; }
+    .note { fill:none; stroke:var(--ink); stroke-width:4; }
+    .clef { font-family:'Segoe UI Symbol','Noto Music',serif; font-size:162px; fill:var(--ink); }
+    #feedback { min-height:30px; margin:0 0 12px; font-size:1.1rem; font-weight:700; }
+    #feedback.correct { color:var(--green); }
+    #feedback.incorrect { color:var(--red); }
+    .answers { display:grid; grid-template-columns:repeat(7,1fr); gap:8px; }
+    .answer { min-width:0; min-height:66px; border:2px solid #c8d0c8; border-radius:12px; background:#fff; color:var(--ink); font-size:clamp(1.25rem,5vw,1.75rem); font-weight:750; cursor:pointer; touch-action:manipulation; transition:transform .08s, background .12s, border-color .12s; }
+    .answer:hover { border-color:#65806c; }
+    .answer:active { transform:scale(.96); }
+    .answer.correct { background:#d9f1e3; border-color:var(--green); }
+    .answer.wrong { background:#f7dcdc; border-color:var(--red); }
+    .key { display:block; margin-top:3px; color:#718077; font-size:.68rem; font-weight:600; }
+    @media (max-width:520px) { .answers { grid-template-columns:repeat(4,1fr); } .answer { min-height:60px; } main { padding:12px; } }
+    @media (prefers-reduced-motion:reduce) { .answer { transition:none; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Craic the Clef</h1>
+  <div class="scorebar"><span id="score">0 / 0 correct</span><button id="reset" type="button">Reset</button></div>
+  <div class="card">
+    <svg id="notation" viewBox="0 0 700 300" role="img" aria-labelledby="notation-title">
+      <title id="notation-title">Treble clef sight-reading note</title>
+      <g id="staff"></g><g id="clef"></g><g id="ledger-lines"></g><g id="note"></g>
+    </svg>
+  </div>
+  <p id="feedback" aria-live="polite">Name the note</p>
+  <div id="answers" class="answers" aria-label="Answer choices"></div>
+</main>
+<script>
+(() => {
+  'use strict';
+
+  // Musical identity stays independent of notation and future instruments.
+  const LETTERS = ['C', 'D', 'E', 'F', 'G', 'A', 'B'];
+  const makePitch = (letter, octave) => ({ letter, octave, id: `${letter}${octave}` });
+
+  // Diatonic positions: bottom staff line E4 = 0; each step moves half a staff space.
+  const STAFF = { bottomLinePitch: makePitch('E', 4), minStep: -4, maxStep: 12 };
+  const diatonicNumber = ({ letter, octave }) => octave * 7 + LETTERS.indexOf(letter);
+  const staffStep = pitch => diatonicNumber(pitch) - diatonicNumber(STAFF.bottomLinePitch);
+  const pitchAtStep = step => {
+    const number = diatonicNumber(STAFF.bottomLinePitch) + step;
+    return makePitch(LETTERS[((number % 7) + 7) % 7], Math.floor(number / 7));
+  };
+  const QUESTION_RANGE = Array.from(
+    { length: STAFF.maxStep - STAFF.minStep + 1 },
+    (_, i) => pitchAtStep(STAFF.minStep + i)
+  );
+
+  // Reserved data boundary for Phase 4: layouts map full pitch IDs, never SVG positions.
+  const instrumentLayouts = new Map();
+
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const svgEl = (name, attrs = {}) => {
+    const el = document.createElementNS(SVG_NS, name);
+    Object.entries(attrs).forEach(([key, value]) => el.setAttribute(key, value));
+    return el;
+  };
+
+  const renderer = (() => {
+    const bottomY = 210, halfSpace = 15, noteX = 420;
+    const staffGroup = document.querySelector('#staff');
+    const clefGroup = document.querySelector('#clef');
+    const ledgerGroup = document.querySelector('#ledger-lines');
+    const noteGroup = document.querySelector('#note');
+
+    [0, 2, 4, 6, 8].forEach(step => staffGroup.append(svgEl('line', {
+      x1: 130, y1: bottomY - step * halfSpace, x2: 610, y2: bottomY - step * halfSpace, class: 'staff-line'
+    })));
+    const clef = svgEl('text', { x: 138, y: 213, class: 'clef', 'aria-hidden': 'true' });
+    clef.textContent = '\u{1D11E}';
+    clefGroup.append(clef);
+
+    const ledgerSteps = step => {
+      const result = [];
+      if (step < 0) for (let s = -2; s >= step; s -= 2) result.push(s);
+      if (step > 8) for (let s = 10; s <= step; s += 2) result.push(s);
+      return result;
+    };
+
+    const render = pitch => {
+      ledgerGroup.replaceChildren();
+      noteGroup.replaceChildren();
+      const step = staffStep(pitch);
+      ledgerSteps(step).forEach(s => ledgerGroup.append(svgEl('line', {
+        x1: noteX - 31, y1: bottomY - s * halfSpace, x2: noteX + 31, y2: bottomY - s * halfSpace, class: 'ledger-line'
+      })));
+      noteGroup.append(svgEl('ellipse', {
+        cx: noteX, cy: bottomY - step * halfSpace, rx: 18, ry: 12, class: 'note', transform: `rotate(-14 ${noteX} ${bottomY - step * halfSpace})`
+      }));
+      document.querySelector('#notation-title').textContent = 'Treble clef with one note to identify';
+    };
+    return { render };
+  })();
+
+  const exercise = {
+    next(previous) {
+      const choices = previous ? QUESTION_RANGE.filter(pitch => pitch.id !== previous.id) : QUESTION_RANGE;
+      return choices[Math.floor(Math.random() * choices.length)];
+    }
+  };
+
+  const state = { current: null, correct: 0, attempted: 0, locked: false, timer: null };
+  const scoreEl = document.querySelector('#score');
+  const feedbackEl = document.querySelector('#feedback');
+  const answersEl = document.querySelector('#answers');
+  const keyMap = { c:'C', d:'D', e:'E', f:'F', g:'G', a:'A', b:'B' };
+  const keyForLetter = Object.fromEntries(Object.entries(keyMap).map(([key, letter]) => [letter, key.toUpperCase()]));
+
+  function updateScore() { scoreEl.textContent = `${state.correct} / ${state.attempted} correct`; }
+  function showQuestion() {
+    state.current = exercise.next(state.current);
+    state.locked = false;
+    feedbackEl.textContent = 'Name the note';
+    feedbackEl.className = '';
+    document.querySelectorAll('.answer').forEach(button => { button.className = 'answer'; button.disabled = false; });
+    renderer.render(state.current);
+  }
+  function answer(letter) {
+    if (state.locked) return;
+    state.locked = true;
+    state.attempted += 1;
+    const isCorrect = letter === state.current.letter;
+    if (isCorrect) state.correct += 1;
+    updateScore();
+    document.querySelectorAll('.answer').forEach(button => {
+      button.disabled = true;
+      if (button.dataset.letter === state.current.letter) button.classList.add('correct');
+      else if (button.dataset.letter === letter) button.classList.add('wrong');
+    });
+    feedbackEl.textContent = isCorrect ? 'Correct!' : `Not quite — this is ${state.current.letter}`;
+    feedbackEl.className = isCorrect ? 'correct' : 'incorrect';
+    state.timer = window.setTimeout(showQuestion, isCorrect ? 450 : 900);
+  }
+  function reset() {
+    clearTimeout(state.timer);
+    Object.assign(state, { current:null, correct:0, attempted:0, locked:false, timer:null });
+    updateScore(); showQuestion();
+  }
+
+  LETTERS.forEach(letter => {
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'answer'; button.dataset.letter = letter;
+    button.innerHTML = `${letter}<span class="key">${keyForLetter[letter]}</span>`;
+    button.addEventListener('click', () => answer(letter));
+    answersEl.append(button);
+  });
+  document.addEventListener('keydown', event => {
+    if (event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
+    const letter = keyMap[event.key.toLowerCase()];
+    if (letter) { event.preventDefault(); answer(letter); }
+  });
+  document.querySelector('#reset').addEventListener('click', reset);
+  reset();
+})();
+</script>
+</body>
+</html>
